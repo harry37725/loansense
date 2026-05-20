@@ -1,0 +1,313 @@
+{
+  "name": "LoanSense — Local Loan Risk Analyzer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "loan-risk",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "7802b54a-7409-4111-9fb1-acd845598931",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -1104,
+        192
+      ],
+      "webhookId": "56c1b90c-3bee-4910-b40c-e336e36f64a2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Validate & Normalize Input ──────────────────────────────\nconst body = $input.first().json.body || $input.first().json;\n\n// Required fields\nconst required = [\n  'revolving_util', 'age', 'late_30_59', 'debt_ratio',\n  'monthly_income', 'open_credit_lines', 'late_90',\n  'real_estate_loans', 'late_60_89', 'dependents'\n];\n\nconst missing = required.filter(f => body[f] === undefined || body[f] === null || body[f] === '');\nif (missing.length > 0) {\n  throw new Error(`Missing required fields: ${missing.join(', ')}`);\n}\n\n// Range validation\nconst errors = [];\nconst age            = parseInt(body.age);\nconst revolving_util = parseFloat(body.revolving_util);\nconst monthly_income = parseFloat(body.monthly_income);\nconst debt_ratio     = parseFloat(body.debt_ratio);\nconst late_30_59     = parseInt(body.late_30_59);\nconst late_60_89     = parseInt(body.late_60_89);\nconst late_90        = parseInt(body.late_90);\n\nif (isNaN(age) || age < 18 || age > 120)               errors.push('age must be 18-120');\nif (isNaN(revolving_util) || revolving_util < 0 || revolving_util > 1) errors.push('revolving_util must be 0.0-1.0');\nif (isNaN(monthly_income) || monthly_income <= 0)       errors.push('monthly_income must be > 0');\nif (isNaN(debt_ratio) || debt_ratio < 0)               errors.push('debt_ratio cannot be negative');\nif (isNaN(late_30_59) || late_30_59 < 0)               errors.push('late_30_59 cannot be negative');\nif (isNaN(late_60_89) || late_60_89 < 0)               errors.push('late_60_89 cannot be negative');\nif (isNaN(late_90)    || late_90 < 0)                  errors.push('late_90 cannot be negative');\n\nif (errors.length > 0) {\n  throw new Error(`Validation failed: ${errors.join(' | ')}`);\n}\n\n// Generate applicant ID if not provided\nconst applicant_id = body.applicant_id || `APP-${Date.now()}`;\n\nreturn [{\n  json: {\n    applicant_id,\n    source:            'API Webhook',\n    received_at:       new Date().toISOString(),\n    revolving_util,\n    age,\n    late_30_59,\n    debt_ratio,\n    monthly_income,\n    open_credit_lines: parseInt(body.open_credit_lines),\n    late_90,\n    real_estate_loans: parseInt(body.real_estate_loans),\n    late_60_89,\n    dependents:        parseInt(body.dependents)\n  }\n}];"
+      },
+      "id": "2343fd15-3f26-461d-94b5-5c39b7aa2647",
+      "name": "Validate & Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/predict",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ revolving_util: $json.revolving_util, age: $json.age, late_30_59: $json.late_30_59, debt_ratio: $json.debt_ratio, monthly_income: $json.monthly_income, open_credit_lines: $json.open_credit_lines, late_90: $json.late_90, real_estate_loans: $json.real_estate_loans, late_60_89: $json.late_60_89, dependents: $json.dependents }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a8fa2e9d-388f-441f-b344-bb22493e1602",
+      "name": "Call Flask ML API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -656,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Merge ML result with original input ─────────────────────\nconst ml    = $input.first().json;\nconst input = $('Validate & Normalize').first().json;\n\nconst factors = ml.top_risk_factors || [];\n\nconst riskEmoji = { HIGH: '🔴', MEDIUM: '🟡', LOW: '🟢' }[ml.risk_level] || '⚪';\n\nconst report = {\n  // ── Identity ──\n  applicant_id:           input.applicant_id,\n  source:                 input.source,\n  timestamp:              new Date().toISOString(),\n  received_at:            input.received_at,\n\n  // ── Input Features ──\n  age:                    input.age,\n  monthly_income:         input.monthly_income,\n  debt_ratio:             input.debt_ratio,\n  revolving_util:         input.revolving_util,\n  late_30_59:             input.late_30_59,\n  late_60_89:             input.late_60_89,\n  late_90:                input.late_90,\n  open_credit_lines:      input.open_credit_lines,\n  real_estate_loans:      input.real_estate_loans,\n  dependents:             input.dependents,\n\n  // ── ML Output ──\n  default_probability:    ml.default_probability,\n  default_probability_pct:`${(ml.default_probability * 100).toFixed(1)}%`,\n  risk_level:             ml.risk_level,\n  risk_emoji:             riskEmoji,\n  prediction:             ml.prediction === 1 ? 'WILL DEFAULT' : 'WILL NOT DEFAULT',\n  recommendation:         ml.recommendation,\n  risk_factor_1:          factors[0] || 'N/A',\n  risk_factor_2:          factors[1] || 'N/A',\n  risk_factor_3:          factors[2] || 'N/A',\n  model:                  ml.model,\n  threshold_used:         ml.threshold_used,\n\n  // ── Flags ──\n  is_high_risk:           ml.risk_level === 'HIGH',\n  filename:               `LoanSense_${input.applicant_id}_${Date.now()}.html`\n};\n\nreturn [{ json: report }];"
+      },
+      "id": "6a9e49a7-103e-401b-9752-76a88bb5c25c",
+      "name": "Parse & Build Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Generate styled HTML report ─────────────────────────────\nconst r = $input.first().json;\n\nconst colors = { HIGH: '#e74c3c', MEDIUM: '#f39c12', LOW: '#2ecc71' };\nconst color  = colors[r.risk_level] || '#95a5a6';\n\nconst html = `<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>LoanSense Report — ${r.applicant_id}</title>\n  <style>\n    * { box-sizing: border-box; margin: 0; padding: 0; }\n    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f0f2f5; padding: 30px; color: #2c3e50; }\n    .card { background: white; border-radius: 12px; padding: 30px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }\n    .header { background: linear-gradient(135deg, #2c3e50, #34495e); color: white; border-radius: 12px; padding: 30px; margin-bottom: 20px; }\n    .header h1 { font-size: 26px; margin-bottom: 6px; }\n    .header p  { opacity: 0.75; font-size: 13px; }\n    .badge { display: inline-block; background: ${color}; color: white; padding: 8px 22px; border-radius: 20px; font-size: 20px; font-weight: 700; margin: 12px 0; }\n    .prob { font-size: 42px; font-weight: 800; color: ${color}; }\n    .prob-label { font-size: 12px; color: #7f8c8d; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }\n    .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #7f8c8d; margin-bottom: 16px; border-bottom: 2px solid #f0f2f5; padding-bottom: 8px; }\n    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }\n    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }\n    .stat { background: #f8f9fa; border-radius: 8px; padding: 14px; }\n    .stat-label { font-size: 11px; color: #95a5a6; text-transform: uppercase; margin-bottom: 4px; }\n    .stat-value { font-size: 20px; font-weight: 700; color: #2c3e50; }\n    .factor { background: #fff5f5; border-left: 4px solid ${color}; border-radius: 0 8px 8px 0; padding: 12px 16px; margin-bottom: 10px; font-size: 14px; }\n    .recommendation { background: ${color}; color: white; border-radius: 10px; padding: 18px 24px; font-size: 17px; font-weight: 700; text-align: center; margin-bottom: 20px; }\n    .footer { text-align: center; color: #bdc3c7; font-size: 12px; padding-top: 10px; }\n    .divider { height: 1px; background: #f0f2f5; margin: 16px 0; }\n  </style>\n</head>\n<body>\n\n  <div class=\"header\">\n    <h1>🏦 LoanSense Risk Report</h1>\n    <p>Applicant: <strong>${r.applicant_id}</strong> &nbsp;·&nbsp; ${new Date(r.timestamp).toLocaleString()} &nbsp;·&nbsp; Source: ${r.source}</p>\n  </div>\n\n  <div class=\"card\">\n    <div class=\"section-title\">Risk Assessment</div>\n    <div class=\"prob-label\">Default Probability</div>\n    <div class=\"prob\">${r.default_probability_pct}</div>\n    <div class=\"badge\">${r.risk_emoji} ${r.risk_level} RISK</div>\n    <div class=\"divider\"></div>\n    <div class=\"grid\">\n      <div class=\"stat\">\n        <div class=\"stat-label\">Prediction</div>\n        <div class=\"stat-value\" style=\"font-size:15px\">${r.prediction}</div>\n      </div>\n      <div class=\"stat\">\n        <div class=\"stat-label\">Model</div>\n        <div class=\"stat-value\" style=\"font-size:15px\">${r.model}</div>\n      </div>\n    </div>\n  </div>\n\n  <div class=\"recommendation\">${r.recommendation}</div>\n\n  <div class=\"card\">\n    <div class=\"section-title\">Top Risk Factors</div>\n    <div class=\"factor\">⚠️ &nbsp;${r.risk_factor_1}</div>\n    <div class=\"factor\">⚠️ &nbsp;${r.risk_factor_2}</div>\n    <div class=\"factor\">⚠️ &nbsp;${r.risk_factor_3}</div>\n  </div>\n\n  <div class=\"card\">\n    <div class=\"section-title\">Applicant Details</div>\n    <div class=\"grid-3\">\n      <div class=\"stat\"><div class=\"stat-label\">Age</div><div class=\"stat-value\">${r.age}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Monthly Income</div><div class=\"stat-value\">$${r.monthly_income.toLocaleString()}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Debt Ratio</div><div class=\"stat-value\">${r.debt_ratio}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Credit Utilization</div><div class=\"stat-value\">${(r.revolving_util*100).toFixed(0)}%</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Late 30-59 Days</div><div class=\"stat-value\">${r.late_30_59}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Late 60-89 Days</div><div class=\"stat-value\">${r.late_60_89}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Late 90+ Days</div><div class=\"stat-value\">${r.late_90}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Open Credit Lines</div><div class=\"stat-value\">${r.open_credit_lines}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Real Estate Loans</div><div class=\"stat-value\">${r.real_estate_loans}</div></div>\n      <div class=\"stat\"><div class=\"stat-label\">Dependents</div><div class=\"stat-value\">${r.dependents}</div></div>\n    </div>\n  </div>\n\n  <div class=\"footer\">\n    <p>LoanSense v1.0 &nbsp;·&nbsp; Model: ${r.model} &nbsp;·&nbsp; Threshold: ${r.threshold_used} &nbsp;·&nbsp; Generated: ${new Date(r.timestamp).toLocaleString()}</p>\n  </div>\n\n</body>\n</html>`;\n\nreturn [{ json: { ...r, html_report: html } }];"
+      },
+      "id": "9abd43d9-250a-4893-8018-76074bd3d6ee",
+      "name": "Generate HTML Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.risk_level }}",
+              "rightValue": "HIGH",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1a979b48-de18-4e86-8dae-418e394a1360",
+      "name": "Is HIGH Risk?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        16,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  status: 'success',\n  applicant_id: $('Parse & Build Report').first().json.applicant_id,\n  timestamp: $('Parse & Build Report').first().json.timestamp,\n  risk_assessment: {\n    risk_level: $('Parse & Build Report').first().json.risk_level,\n    risk_indicator: $('Parse & Build Report').first().json.risk_emoji,\n    default_probability: $('Parse & Build Report').first().json.default_probability,\n    default_probability_pct: $('Parse & Build Report').first().json.default_probability_pct,\n    prediction: $('Parse & Build Report').first().json.prediction,\n    recommendation: $('Parse & Build Report').first().json.recommendation\n  },\n  risk_factors: [\n    $('Parse & Build Report').first().json.risk_factor_1,\n    $('Parse & Build Report').first().json.risk_factor_2,\n    $('Parse & Build Report').first().json.risk_factor_3\n  ],\n  report_saved: true,\n  report_filename: $('Parse & Build Report').first().json.filename,\n  logged: true\n}) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "f078db4d-2541-48ad-9a1b-2be827440dd4",
+      "name": "Respond with JSON",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        464,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/log-high-risk",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        240,
+        384
+      ],
+      "id": "b75fafea-e590-45a0-acc9-bf448f6958d4",
+      "name": "Log High Risk Alert"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/log-prediction",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        240,
+        192
+      ],
+      "id": "7c2bd698-8c82-42d1-9eaf-4bb22ff62853",
+      "name": "Log to All Predictions1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/save-report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        240,
+        0
+      ],
+      "id": "ade6daf7-8446-4b78-87db-e1f644f96517",
+      "name": "Save HTML Report "
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate & Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Normalize": {
+      "main": [
+        [
+          {
+            "node": "Call Flask ML API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Flask ML API": {
+      "main": [
+        [
+          {
+            "node": "Parse & Build Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Build Report": {
+      "main": [
+        [
+          {
+            "node": "Generate HTML Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate HTML Report": {
+      "main": [
+        [
+          {
+            "node": "Is HIGH Risk?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save HTML Report ",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log to All Predictions1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is HIGH Risk?": {
+      "main": [
+        [
+          {
+            "node": "Log High Risk Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log High Risk Alert": {
+      "main": [
+        [
+          {
+            "node": "Respond with JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to All Predictions1": {
+      "main": [
+        [
+          {
+            "node": "Respond with JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save HTML Report ": {
+      "main": [
+        [
+          {
+            "node": "Respond with JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "1ae3c477-8969-4bff-8d66-24ec735f3e16",
+  "meta": {
+    "instanceId": "91dd6b86504ed0a18b0953379244e6ae35868ca8cf093eb764b26cc00b4222de"
+  },
+  "id": "ub1WI5AOZAk_c32sdKlnG",
+  "tags": []
+}

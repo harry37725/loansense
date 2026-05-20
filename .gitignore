@@ -1,0 +1,20 @@
+# Dataset — too large for GitHub
+data/
+
+# Trained model files & results
+models/saved/
+
+# Generated reports & logs
+reports/
+logs/
+
+# Python
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

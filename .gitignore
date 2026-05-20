@@ -1,3 +1,5 @@
+# Overwrite .gitignore cleanly
+@"
 # Dataset — too large for GitHub
 data/
 
@@ -18,3 +20,4 @@ __pycache__/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+"@ | Set-Content .gitignore
